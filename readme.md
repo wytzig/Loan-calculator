@@ -6,3 +6,8 @@ Contains
 - react app with a simple 'LoanVisualization' component that you can run with ```npm install``` and then ```npm run dev```. 
   - I used node 20.19.4 and npm 10.8.2 🤷‍♂️🤷
   - Local:   http://localhost:5173/
+
+![image](/convex%20interest%20curve%20visualization.png)
+![image](2.png)
+![image](3.png)
+![image](4.png)
