@@ -260,3 +260,53 @@ h1, h2, h3, h4 {
   background: rgba(239,68,68,0.15);
   transform: scale(1.1);
 }
+
+/* ============================= */
+/* ADD TO App.css                */
+/* ============================= */
+
+/* Loan name block above inputs */
+.loan-name-block {
+  margin-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  max-width: 320px;
+}
+
+.loan-name-block label {
+  font-size: 13px;
+  color: #cbd5e1;
+  margin-bottom: 6px;
+}
+
+.loan-name-block input {
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+  background: #020617;
+  color: #e5e7eb;
+  font-size: 14px;
+}
+
+/* Input groups with labels */
+.input-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.input-group label {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-bottom: 4px;
+}
+
+/* Inline rename input */
+.loan-name-inline {
+  width: 100%;
+  background: #020617;
+  border: 1px solid #3b82f6;
+  color: white;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 13px;
+}
