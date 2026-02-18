@@ -7,6 +7,115 @@ import {
 } from 'recharts';
 
 /* ----------------------------- */
+/* IRR Solver                    */
+/* ----------------------------- */
+/**
+ * Computes annualized IRR (as a percentage) from a loan's cashflow schedule.
+ *
+ * cashflows: array of { payment, periodMonths } — each payment and how many
+ *   months after disbursement it occurs.
+ * principal: the upfront disbursement (positive number).
+ *
+ * We solve for the monthly rate r such that:
+ *   principal = Σ [ payment_t / (1 + r)^(months_t) ]
+ * then annualize: annualRate = (1 + r)^12 - 1
+ *
+ * Uses Newton-Raphson with a bisection fallback.
+ */
+const computeIRR = (principal, cashflows) => {
+  if (!cashflows || cashflows.length === 0 || principal <= 0) return 0;
+
+  // f(r) = -principal + Σ payment / (1+r)^months
+  const npv = (r) => {
+    let sum = -principal;
+    for (const { payment, months } of cashflows) {
+      sum += payment / Math.pow(1 + r, months);
+    }
+    return sum;
+  };
+
+  const npvDerivative = (r) => {
+    let sum = 0;
+    for (const { payment, months } of cashflows) {
+      sum -= months * payment / Math.pow(1 + r, months + 1);
+    }
+    return sum;
+  };
+
+  // Newton-Raphson starting from an educated guess
+  let r = 0.008; // ~10% annual as monthly starting point
+  for (let i = 0; i < 100; i++) {
+    const fn = npv(r);
+    const dfn = npvDerivative(r);
+    if (Math.abs(dfn) < 1e-12) break;
+    const rNew = r - fn / dfn;
+    if (Math.abs(rNew - r) < 1e-10) { r = rNew; break; }
+    r = rNew;
+    if (r <= -1) r = 0.0001; // guard against going negative
+  }
+
+  // Annualize: (1 + monthlyRate)^12 - 1
+  const annualized = (Math.pow(1 + r, 12) - 1) * 100;
+  return isFinite(annualized) ? annualized : 0;
+};
+
+/**
+ * Computes the true annualized effective interest rate for a loan.
+ * Returns a percentage.
+ */
+const computeEffectiveRate = (loan) => {
+  const cashflows = buildCashflows(loan);
+  const irr = computeIRR(loan.principal, cashflows);
+  return irr; // already annualized in computeIRR
+};
+
+
+/**
+ * Builds the cashflow array for a loan, returning { payment, months } per period.
+ * months is the number of months from disbursement to that payment.
+ */
+const buildCashflows = (loan) => {
+  const { principal, totalMonths, annualRate, paymentFrequency, loanType, graceMonths } = loan;
+  const cashflows = [];
+
+  if (loanType === 'bullet') {
+    const totalPeriods = Math.ceil(totalMonths / paymentFrequency);
+    const interestPerPeriod = principal * (annualRate / 100) * (paymentFrequency / 12);
+    for (let p = 1; p <= totalPeriods; p++) {
+      const months = p * paymentFrequency;
+      const isLast = p === totalPeriods;
+      cashflows.push({
+        payment: isLast ? principal + interestPerPeriod : interestPerPeriod,
+        months
+      });
+    }
+  } else {
+    const periodsPerYear = 12 / paymentFrequency;
+    const periodRate = annualRate / 100 / periodsPerYear;
+    const gracePeriods = Math.floor(graceMonths / paymentFrequency);
+    const amortPeriods = Math.ceil((totalMonths - graceMonths) / paymentFrequency);
+    const principalPerPeriod = principal / amortPeriods;
+
+    let balance = principal;
+    // Grace periods — interest only
+    for (let p = 1; p <= gracePeriods; p++) {
+      cashflows.push({ payment: principal * periodRate, months: p * paymentFrequency });
+    }
+    // Amortization periods
+    for (let p = 1; p <= amortPeriods; p++) {
+      const interest = balance * periodRate;
+      cashflows.push({
+        payment: principalPerPeriod + interest,
+        months: (gracePeriods + p) * paymentFrequency
+      });
+      balance -= principalPerPeriod;
+    }
+  }
+
+  return cashflows;
+};
+
+/* ----------------------------- */
 /* Loan Factory */
 /* ----------------------------- */
 const createLoan = (id) => ({
@@ -145,67 +254,82 @@ export default function App() {
   /* ----------------------------- */
   const finalStats = useMemo(() => {
     const last = data[data.length - 1];
-    if (!last) return { interest: 0, paid: 0, effectiveRate: 0 };
+    if (!last) return { interest: 0, paid: 0, effectiveRate: 0, irrRate: 0 };
 
     const interest = last.cumulative_interest;
     const paid = activeLoan.principal + interest;
-    const effectiveRate = (interest / activeLoan.principal) * 100;
 
-    return { interest, paid, effectiveRate };
+    const years = activeLoan.totalMonths / 12;
+
+    // Average annualized interest (like your small example)
+    const effectiveRate = (interest / activeLoan.principal) / years * 100;
+
+    const cashflows = buildCashflows(activeLoan);
+    const irrRate = computeIRR(activeLoan.principal, cashflows);
+
+    return { interest, paid, effectiveRate, irrRate };
   }, [data, activeLoan]);
 
+
+
   /* ----------------------------- */
-  /* Portfolio Totals (FIXED)      */
+  /* Portfolio Totals              */
   /* ----------------------------- */
   const portfolioTotals = useMemo(() => {
+    if (!loans || loans.length === 0)
+      return { totalPrincipal: 0, totalInterest: 0, effectiveRate: 0, irrRate: 0 };
 
     let totalPrincipal = 0;
     let totalInterest = 0;
+    let weightedEffectiveSum = 0;
+    let weightedIRRSum = 0;
 
     loans.forEach(loan => {
+      // Compute cumulative interest for this loan using same logic as `data`
       const { principal, totalMonths, annualRate, paymentFrequency, loanType, graceMonths } = loan;
-      const monthsPerPayment = paymentFrequency;
 
-      if (loanType === 'bullet') {
-        const totalPeriods = Math.ceil(totalMonths / monthsPerPayment);
-        const interestPerPeriod = principal * (annualRate / 100) * (monthsPerPayment / 12);
-        totalInterest += interestPerPeriod * totalPeriods;
-        totalPrincipal += principal;
-      } else {
-        // amortizing
-        const periodsPerYear = 12 / paymentFrequency;
-        const periodRate = annualRate / 100 / periodsPerYear;
-        const gracePeriods = Math.floor(graceMonths / paymentFrequency);
-        const amortPeriods = Math.ceil((totalMonths - graceMonths) / paymentFrequency);
-        const principalPerPeriod = principal / amortPeriods;
+      let interestSum = 0;
+      const periodsPerYear = 12 / paymentFrequency;
+      const periodRate = annualRate / 100 / periodsPerYear;
+      const gracePeriods = Math.floor(graceMonths / paymentFrequency);
+      const amortPeriods = Math.ceil((totalMonths - graceMonths) / paymentFrequency);
+      const principalPerPeriod = loanType === 'amortizing' ? principal / amortPeriods : 0;
 
-        let balance = principal;
-        let interestSum = 0;
+      let balance = principal;
 
-        for (let i = 0; i < gracePeriods; i++) {
-          interestSum += principal * periodRate;
-        }
-
-        for (let i = 0; i < amortPeriods; i++) {
-          interestSum += balance * periodRate;
-          balance -= principalPerPeriod;
-        }
-
-        totalPrincipal += principal;
-        totalInterest += interestSum;
+      // Grace period
+      for (let p = 1; p <= gracePeriods; p++) {
+        interestSum += principal * periodRate;
       }
-    });
 
-    const totalMonthsWeighted = loans.reduce((sum, loan) => sum + loan.totalMonths * loan.principal, 0);
-    const weightedRate = (totalInterest / totalPrincipal) / (totalMonthsWeighted / totalPrincipal / 12) * 100;
+      // Amortization period
+      for (let p = 1; p <= amortPeriods; p++) {
+        const interestPayment = loanType === 'amortizing' ? balance * periodRate : 0;
+        interestSum += interestPayment;
+        balance -= principalPerPeriod;
+      }
+
+      const years = totalMonths / 12;
+      const effectiveRate = (interestSum / principal) / years * 100;
+
+      // IRR
+      const cashflows = buildCashflows(loan);
+      const irr = computeIRR(principal, cashflows);
+
+      totalPrincipal += principal;
+      totalInterest += interestSum;
+      weightedEffectiveSum += effectiveRate * principal;
+      weightedIRRSum += irr * principal;
+    });
 
     return {
       totalPrincipal,
       totalInterest,
-      weightedRate
+      effectiveRate: totalPrincipal > 0 ? weightedEffectiveSum / totalPrincipal : 0,
+      irrRate: totalPrincipal > 0 ? weightedIRRSum / totalPrincipal : 0
     };
+  }, [loans]);
 
-  }, [loans, activeLoan.totalMonths]);
 
 
   /* ----------------------------- */
@@ -287,7 +411,8 @@ export default function App() {
           <h4>Portfolio</h4>
           <div>Total Principal: €{portfolioTotals.totalPrincipal.toFixed(2)}</div>
           <div>Total Interest: €{portfolioTotals.totalInterest.toFixed(2)}</div>
-          <div>Avg Interest: {portfolioTotals.weightedRate.toFixed(2)}%</div>
+          <div>Effective % (total): {portfolioTotals.effectiveRate.toFixed(2)}%</div>
+          <div>IRR (annualized): {portfolioTotals.irrRate.toFixed(2)}%</div>
         </div>
 
       </div>
@@ -374,7 +499,8 @@ export default function App() {
         <div className="stats">
           <Stat title="Interest" value={finalStats.interest} />
           <Stat title="Total Paid" value={finalStats.paid} />
-          <Stat title="Effective %" value={finalStats.effectiveRate} />
+          <Stat title="Effective %" value={finalStats.effectiveRate} isPercent />
+          <Stat title="IRR (annualized)" value={finalStats.irrRate} isPercent />
         </div>
 
         {/* Charts */}
@@ -426,10 +552,10 @@ export default function App() {
 /* Small Components              */
 /* ----------------------------- */
 
-const Stat = ({ title, value }) => (
+const Stat = ({ title, value, isPercent }) => (
   <div className="stat">
     <div>{title}</div>
-    <strong>€{value.toFixed(2)}</strong>
+    <strong>{isPercent ? `${value.toFixed(2)}%` : `€${value.toFixed(2)}`}</strong>
   </div>
 );
 
