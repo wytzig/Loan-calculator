@@ -7,6 +7,8 @@ Contains
   - I used node 20.19.4 and npm 10.8.2 🤷‍♂️🤷
   - Local:   http://localhost:5173/
 
+![image](image.png) (v0.2)
+--------------------------
 ![image](/convex%20interest%20curve%20visualization.png)
 ![image](2.png)
 ![image](3.png)
