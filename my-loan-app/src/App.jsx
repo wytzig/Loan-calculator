@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import './App.css';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -9,23 +9,9 @@ import {
 /* ----------------------------- */
 /* IRR Solver                    */
 /* ----------------------------- */
-/**
- * Computes annualized IRR (as a percentage) from a loan's cashflow schedule.
- *
- * cashflows: array of { payment, periodMonths } — each payment and how many
- *   months after disbursement it occurs.
- * principal: the upfront disbursement (positive number).
- *
- * We solve for the monthly rate r such that:
- *   principal = Σ [ payment_t / (1 + r)^(months_t) ]
- * then annualize: annualRate = (1 + r)^12 - 1
- *
- * Uses Newton-Raphson with a bisection fallback.
- */
 const computeIRR = (principal, cashflows) => {
   if (!cashflows || cashflows.length === 0 || principal <= 0) return 0;
 
-  // f(r) = -principal + Σ payment / (1+r)^months
   const npv = (r) => {
     let sum = -principal;
     for (const { payment, months } of cashflows) {
@@ -42,8 +28,7 @@ const computeIRR = (principal, cashflows) => {
     return sum;
   };
 
-  // Newton-Raphson starting from an educated guess
-  let r = 0.008; // ~10% annual as monthly starting point
+  let r = 0.008;
   for (let i = 0; i < 100; i++) {
     const fn = npv(r);
     const dfn = npvDerivative(r);
@@ -51,29 +36,13 @@ const computeIRR = (principal, cashflows) => {
     const rNew = r - fn / dfn;
     if (Math.abs(rNew - r) < 1e-10) { r = rNew; break; }
     r = rNew;
-    if (r <= -1) r = 0.0001; // guard against going negative
+    if (r <= -1) r = 0.0001;
   }
 
-  // Annualize: (1 + monthlyRate)^12 - 1
   const annualized = (Math.pow(1 + r, 12) - 1) * 100;
   return isFinite(annualized) ? annualized : 0;
 };
 
-/**
- * Computes the true annualized effective interest rate for a loan.
- * Returns a percentage.
- */
-const computeEffectiveRate = (loan) => {
-  const cashflows = buildCashflows(loan);
-  const irr = computeIRR(loan.principal, cashflows);
-  return irr; // already annualized in computeIRR
-};
-
-
-/**
- * Builds the cashflow array for a loan, returning { payment, months } per period.
- * months is the number of months from disbursement to that payment.
- */
 const buildCashflows = (loan) => {
   const { principal, totalMonths, annualRate, paymentFrequency, loanType, graceMonths } = loan;
   const cashflows = [];
@@ -97,11 +66,9 @@ const buildCashflows = (loan) => {
     const principalPerPeriod = principal / amortPeriods;
 
     let balance = principal;
-    // Grace periods — interest only
     for (let p = 1; p <= gracePeriods; p++) {
       cashflows.push({ payment: principal * periodRate, months: p * paymentFrequency });
     }
-    // Amortization periods
     for (let p = 1; p <= amortPeriods; p++) {
       const interest = balance * periodRate;
       cashflows.push({
@@ -126,9 +93,57 @@ const createLoan = (id) => ({
   annualRate: 10,
   graceMonths: 12,
   paymentFrequency: 3,
-  loanType: 'amortizing' // default to amortizing
+  loanType: 'amortizing'
 });
 
+/* ----------------------------- */
+/* Export / Import Helpers       */
+/* ----------------------------- */
+const EXPORT_VERSION = '1.0';
+
+const exportPortfolio = (loans) => {
+  const payload = {
+    version: EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    loans,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `loan-portfolio-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const importPortfolio = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target.result);
+        if (!parsed.loans || !Array.isArray(parsed.loans)) {
+          throw new Error('Invalid file: missing loans array.');
+        }
+        // Validate each loan has required fields
+        const required = ['id', 'name', 'principal', 'totalMonths', 'annualRate', 'graceMonths', 'paymentFrequency', 'loanType'];
+        parsed.loans.forEach((loan, i) => {
+          required.forEach(k => {
+            if (loan[k] === undefined) throw new Error(`Loan ${i + 1} is missing field "${k}".`);
+          });
+        });
+        resolve(parsed.loans);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(new Error('Failed to read file.'));
+    reader.readAsText(file);
+  });
+
+/* ----------------------------- */
+/* Main App                      */
+/* ----------------------------- */
 export default function App() {
 
   /* ----------------------------- */
@@ -137,6 +152,9 @@ export default function App() {
   const [loans, setLoans] = useState([createLoan(1)]);
   const [activeLoanId, setActiveLoanId] = useState(1);
   const [editingLoanId, setEditingLoanId] = useState(null);
+  const [importError, setImportError] = useState(null);
+  const [importSuccess, setImportSuccess] = useState(false);
+  const fileInputRef = useRef(null);
 
   const activeLoan = loans.find(l => l.id === activeLoanId);
 
@@ -158,7 +176,7 @@ export default function App() {
   };
 
   const addLoan = () => {
-    const newId = loans.length + 1;
+    const newId = Math.max(...loans.map(l => l.id)) + 1;
     const newLoan = createLoan(newId);
     setLoans([...loans, newLoan]);
     setActiveLoanId(newId);
@@ -166,12 +184,42 @@ export default function App() {
 
   const removeLoan = (id) => {
     if (loans.length === 1) return;
-
     const updated = loans.filter(l => l.id !== id);
     setLoans(updated);
+    if (id === activeLoanId) setActiveLoanId(updated[0].id);
+  };
 
-    if (id === activeLoanId) {
-      setActiveLoanId(updated[0].id);
+  /* ----------------------------- */
+  /* Export Handler                */
+  /* ----------------------------- */
+  const handleExport = () => {
+    exportPortfolio(loans);
+  };
+
+  /* ----------------------------- */
+  /* Import Handler                */
+  /* ----------------------------- */
+  const handleImportClick = () => {
+    setImportError(null);
+    setImportSuccess(false);
+    fileInputRef.current.click();
+  };
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    // Reset so same file can be re-imported
+    e.target.value = '';
+
+    try {
+      const importedLoans = await importPortfolio(file);
+      setLoans(importedLoans);
+      setActiveLoanId(importedLoans[0].id);
+      setImportSuccess(true);
+      setTimeout(() => setImportSuccess(false), 3000);
+    } catch (err) {
+      setImportError(err.message);
+      setTimeout(() => setImportError(null), 5000);
     }
   };
 
@@ -179,7 +227,6 @@ export default function App() {
   /* Calculation Engine            */
   /* ----------------------------- */
   const data = useMemo(() => {
-
     const { principal, totalMonths, annualRate, paymentFrequency, loanType } = activeLoan;
 
     const monthsPerPayment = paymentFrequency;
@@ -190,9 +237,7 @@ export default function App() {
     let balance = principal;
 
     if (loanType === 'bullet') {
-      // Interest-only / bullet loan
       const interestPerPeriod = principal * (annualRate / 100) * (monthsPerPayment / 12);
-
       for (let p = 1; p <= totalPeriods; p++) {
         cumulativeInterest += interestPerPeriod;
         periods.push({
@@ -204,16 +249,13 @@ export default function App() {
           cumulative_interest: cumulativeInterest
         });
       }
-
     } else {
-      // Amortizing loan
       const periodsPerYear = 12 / paymentFrequency;
       const periodRate = annualRate / 100 / periodsPerYear;
       const gracePeriods = Math.floor(activeLoan.graceMonths / paymentFrequency);
       const amortPeriods = Math.ceil((totalMonths - activeLoan.graceMonths) / paymentFrequency);
       const principalPerPeriod = principal / amortPeriods;
 
-      // Grace period interest
       for (let p = 1; p <= gracePeriods; p++) {
         const interestPayment = principal * periodRate;
         cumulativeInterest += interestPayment;
@@ -227,7 +269,6 @@ export default function App() {
         });
       }
 
-      // Amortization period
       for (let p = 1; p <= amortPeriods; p++) {
         const interestPayment = balance * periodRate;
         const totalPayment = principalPerPeriod + interestPayment;
@@ -245,9 +286,7 @@ export default function App() {
     }
 
     return periods;
-
   }, [activeLoan]);
-
 
   /* ----------------------------- */
   /* Active Loan Stats             */
@@ -258,19 +297,13 @@ export default function App() {
 
     const interest = last.cumulative_interest;
     const paid = activeLoan.principal + interest;
-
     const years = activeLoan.totalMonths / 12;
-
-    // Average annualized interest (like your small example)
     const effectiveRate = (interest / activeLoan.principal) / years * 100;
-
     const cashflows = buildCashflows(activeLoan);
     const irrRate = computeIRR(activeLoan.principal, cashflows);
 
     return { interest, paid, effectiveRate, irrRate };
   }, [data, activeLoan]);
-
-
 
   /* ----------------------------- */
   /* Portfolio Totals              */
@@ -285,7 +318,6 @@ export default function App() {
     let weightedIRRSum = 0;
 
     loans.forEach(loan => {
-      // Compute cumulative interest for this loan using same logic as `data`
       const { principal, totalMonths, annualRate, paymentFrequency, loanType, graceMonths } = loan;
 
       let interestSum = 0;
@@ -297,12 +329,9 @@ export default function App() {
 
       let balance = principal;
 
-      // Grace period
       for (let p = 1; p <= gracePeriods; p++) {
         interestSum += principal * periodRate;
       }
-
-      // Amortization period
       for (let p = 1; p <= amortPeriods; p++) {
         const interestPayment = loanType === 'amortizing' ? balance * periodRate : 0;
         interestSum += interestPayment;
@@ -311,8 +340,6 @@ export default function App() {
 
       const years = totalMonths / 12;
       const effectiveRate = (interestSum / principal) / years * 100;
-
-      // IRR
       const cashflows = buildCashflows(loan);
       const irr = computeIRR(principal, cashflows);
 
@@ -330,13 +357,20 @@ export default function App() {
     };
   }, [loans]);
 
-
-
   /* ----------------------------- */
   /* UI                            */
   /* ----------------------------- */
   return (
     <div className="app-container">
+
+      {/* Hidden file input for import */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json"
+        style={{ display: 'none' }}
+        onChange={handleFileChange}
+      />
 
       {/* Sidebar */}
       <div className="sidebar">
@@ -350,18 +384,9 @@ export default function App() {
           {loans.map(loan => (
             <div
               key={loan.id}
-              className={
-                loan.id === activeLoanId
-                  ? 'loan-item active'
-                  : 'loan-item'
-              }
+              className={loan.id === activeLoanId ? 'loan-item active' : 'loan-item'}
             >
-
-              <div
-                className="loan-info"
-                onClick={() => setActiveLoanId(loan.id)}
-              >
-
+              <div className="loan-info" onClick={() => setActiveLoanId(loan.id)}>
                 {editingLoanId === loan.id ? (
                   <input
                     className="loan-name-input"
@@ -380,25 +405,16 @@ export default function App() {
                     onClick={(e) => e.stopPropagation()}
                   />
                 ) : (
-                  <div
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      setEditingLoanId(loan.id);
-                    }}
-                  >
+                  <div onDoubleClick={(e) => { e.stopPropagation(); setEditingLoanId(loan.id); }}>
                     {loan.name}
                   </div>
                 )}
-
                 <small>€{loan.principal}</small>
               </div>
 
               <button
                 className="delete-loan"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeLoan(loan.id);
-                }}
+                onClick={(e) => { e.stopPropagation(); removeLoan(loan.id); }}
               >
                 ✕
               </button>
@@ -415,6 +431,24 @@ export default function App() {
           <div>IRR (annualized): {portfolioTotals.irrRate.toFixed(2)}%</div>
         </div>
 
+        {/* ---- Export / Import ---- */}
+        <div className="portfolio-actions">
+          <button className="action-btn export-btn" onClick={handleExport} title="Download portfolio as JSON">
+            ⬇ Export
+          </button>
+          <button className="action-btn import-btn" onClick={handleImportClick} title="Load portfolio from JSON">
+            ⬆ Import
+          </button>
+        </div>
+
+        {/* Feedback messages */}
+        {importSuccess && (
+          <div className="import-feedback success">✓ Portfolio imported!</div>
+        )}
+        {importError && (
+          <div className="import-feedback error">✗ {importError}</div>
+        )}
+
       </div>
 
       {/* Main */}
@@ -423,71 +457,45 @@ export default function App() {
         {/* Loan Name */}
         <div className="loan-name-block">
           <label>Loan Name</label>
-          <input
-            value={activeLoan.name}
-            onChange={e => updateLoan('name', e.target.value)}
-          />
+          <input value={activeLoan.name} onChange={e => updateLoan('name', e.target.value)} />
         </div>
 
-        {/* Inputs with labels */}
+        {/* Inputs */}
         <div className="inputs">
 
           <div className="input-group">
             <label>Principal (€)</label>
-            <input
-              type="number"
-              value={activeLoan.principal}
-              onChange={e => updateLoan('principal', +e.target.value)}
-            />
+            <input type="number" value={activeLoan.principal} onChange={e => updateLoan('principal', +e.target.value)} />
           </div>
 
           <div className="input-group">
             <label>Total Months</label>
-            <input
-              type="number"
-              value={activeLoan.totalMonths}
-              onChange={e => updateLoan('totalMonths', +e.target.value)}
-            />
+            <input type="number" value={activeLoan.totalMonths} onChange={e => updateLoan('totalMonths', +e.target.value)} />
           </div>
 
           <div className="input-group">
             <label>Annual Rate (%)</label>
-            <input
-              type="number"
-              value={activeLoan.annualRate}
-              onChange={e => updateLoan('annualRate', +e.target.value)}
-            />
+            <input type="number" value={activeLoan.annualRate} onChange={e => updateLoan('annualRate', +e.target.value)} />
           </div>
 
           <div className="input-group">
             <label>Grace Period</label>
-            <input
-              type="number"
-              value={activeLoan.graceMonths}
-              onChange={e => updateLoan('graceMonths', +e.target.value)}
-            />
+            <input type="number" value={activeLoan.graceMonths} onChange={e => updateLoan('graceMonths', +e.target.value)} />
           </div>
 
           <div className="input-group">
             <label>Payment Frequency</label>
-            <select
-              value={activeLoan.paymentFrequency}
-              onChange={e =>
-                updateLoan('paymentFrequency', +e.target.value)
-              }
-            >
+            <select value={activeLoan.paymentFrequency} onChange={e => updateLoan('paymentFrequency', +e.target.value)}>
               <option value={1}>Monthly</option>
               <option value={3}>Quarterly</option>
               <option value={6}>Semi-Annual</option>
               <option value={12}>Annual</option>
             </select>
           </div>
+
           <div className="input-group">
             <label>Loan Type</label>
-            <select
-              value={activeLoan.loanType}
-              onChange={e => updateLoan('loanType', e.target.value)}
-            >
+            <select value={activeLoan.loanType} onChange={e => updateLoan('loanType', e.target.value)}>
               <option value="amortizing">Amortizing</option>
               <option value="bullet">Bullet / Interest-only</option>
             </select>
@@ -527,7 +535,6 @@ export default function App() {
           </AreaChart>
         </ChartBlock>
 
-        {/* RESTORED SCREEN */}
         <ChartBlock title="Cumulative Interest Growth">
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" />
@@ -535,11 +542,7 @@ export default function App() {
             <YAxis />
             <Tooltip />
             <Legend />
-            <Line
-              type="monotone"
-              dataKey="cumulative_interest"
-              strokeWidth={3}
-            />
+            <Line type="monotone" dataKey="cumulative_interest" strokeWidth={3} />
           </LineChart>
         </ChartBlock>
 
