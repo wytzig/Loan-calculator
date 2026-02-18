@@ -145,11 +145,13 @@ export default function App() {
   /* ----------------------------- */
   const finalStats = useMemo(() => {
     const last = data[data.length - 1];
-    if (!last) return { interest: 0, paid: 0 };
+    if (!last) return { interest: 0, paid: 0, effectiveRate: 0 };
 
-    return {
-      interest: last.cumulative_interest,
-      paid: activeLoan.principal + last.cumulative_interest    };
+    const interest = last.cumulative_interest;
+    const paid = activeLoan.principal + interest;
+    const effectiveRate = (interest / activeLoan.principal) * 100;
+
+    return { interest, paid, effectiveRate };
   }, [data, activeLoan]);
 
   /* ----------------------------- */
@@ -194,7 +196,8 @@ export default function App() {
       }
     });
 
-    const weightedRate = (totalInterest / totalPrincipal) / (activeLoan.totalMonths / 12) * 100;
+    const totalMonthsWeighted = loans.reduce((sum, loan) => sum + loan.totalMonths * loan.principal, 0);
+    const weightedRate = (totalInterest / totalPrincipal) / (totalMonthsWeighted / totalPrincipal / 12) * 100;
 
     return {
       totalPrincipal,
@@ -371,6 +374,7 @@ export default function App() {
         <div className="stats">
           <Stat title="Interest" value={finalStats.interest} />
           <Stat title="Total Paid" value={finalStats.paid} />
+          <Stat title="Effective %" value={finalStats.effectiveRate} />
         </div>
 
         {/* Charts */}
